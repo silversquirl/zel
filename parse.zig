@@ -4,8 +4,11 @@ const Value = @import("value.zig").Value;
 /// Parses a list of values from the provided code slice. Destructively modifies code.
 /// No allocations are performed other than to create the returned values.
 pub fn parse(allocator: std.mem.Allocator, code: []u8) ParseError!*Value {
-    var toks = Tokenizer.init(code);
-    return parseList(allocator, &toks, .eof);
+    var parser = Parser{
+        .allocator = allocator,
+        .toks = Tokenizer.init(code),
+    };
+    return parser.list(.eof);
 }
 pub const ParseError = error{
     EndOfStream,
@@ -15,49 +18,54 @@ pub const ParseError = error{
     OutOfMemory,
 };
 
-fn parseList(allocator: std.mem.Allocator, toks: *Tokenizer, end: Token.Tag) ParseError!*Value {
-    var val = Value.nil;
-    var tail: ?*Value = null;
-    while (true) {
-        const tok = toks.next();
-        if (tok.tag == end) break;
+const Parser = struct {
+    allocator: std.mem.Allocator,
+    toks: Tokenizer,
 
-        const parsed = try parseValue(allocator, toks, tok);
+    fn list(self: *Parser, end: Token.Tag) ParseError!*Value {
+        var val = Value.nil;
+        var tail: ?*Value = null;
+        while (true) {
+            const tok = self.toks.next();
+            if (tok.tag == end) break;
 
-        const v = if (tail) |t| &t.cons[1] else &val;
-        std.debug.assert(v.* == Value.nil);
+            const parsed = try self.value(tok);
 
-        v.* = try Value.cons(allocator, parsed, Value.nil);
-        tail = v.*;
+            const v = if (tail) |t| &t.cons[1] else &val;
+            std.debug.assert(v.* == Value.nil);
+
+            v.* = try Value.cons(self.allocator, parsed, Value.nil);
+            tail = v.*;
+        }
+        return val;
     }
-    return val;
-}
 
-fn parseValue(allocator: std.mem.Allocator, toks: *Tokenizer, tok: Token) ParseError!*Value {
-    return switch (tok.tag) {
-        .eof => error.EndOfStream,
-        .invalid => error.InvalidToken,
-        .@")" => error.UnexpectedToken,
+    fn value(self: *Parser, tok: Token) ParseError!*Value {
+        return switch (tok.tag) {
+            .eof => error.EndOfStream,
+            .invalid => error.InvalidToken,
+            .@")" => error.UnexpectedToken,
 
-        .@"(" => try parseList(allocator, toks, .@")"),
-        .@"'" => try Value.cons(
-            allocator,
-            try Value.sym(allocator, "quote"),
-            try Value.cons(
-                allocator,
-                try parseValue(allocator, toks, toks.next()),
-                Value.nil,
+            .@"(" => try self.list(.@")"),
+            .@"'" => try Value.cons(
+                self.allocator,
+                try Value.sym(self.allocator, "quote"),
+                try Value.cons(
+                    self.allocator,
+                    try self.value(self.toks.next()),
+                    Value.nil,
+                ),
             ),
-        ),
 
-        .integer => try Value.int(allocator, std.fmt.parseInt(i64, tok.text, 0) catch |err| switch (err) {
-            error.InvalidCharacter => unreachable,
-            else => |e| return e,
-        }),
-        .string => try Value.str(allocator, tok.text[1 .. tok.text.len - 1]),
-        .symbol => try Value.sym(allocator, tok.text),
-    };
-}
+            .integer => try Value.int(self.allocator, std.fmt.parseInt(i64, tok.text, 0) catch |err| switch (err) {
+                error.InvalidCharacter => unreachable,
+                else => |e| return e,
+            }),
+            .string => try Value.str(self.allocator, tok.text[1 .. tok.text.len - 1]),
+            .symbol => try Value.sym(self.allocator, tok.text),
+        };
+    }
+};
 
 const Token = struct {
     tag: Tag,
